@@ -398,7 +398,11 @@ class Api::V1::AuthController < Api::BaseController
 
   def render_successful_login(user)
     attempt_setup(user)
-    invalidate_user_tokens(user)
+    # Só derruba sessões do MESMO tipo de dispositivo (PC ou celular) do
+    # login atual — permite 1 sessão PC + 1 sessão celular simultâneas
+    # em vez de só uma sessão no total (era invalidate_user_tokens, que
+    # revogava TUDO a cada login, derrubando qualquer outro dispositivo).
+    invalidate_same_device_tokens(user, classify_device_type(request&.user_agent))
 
     # Create new OAuth token
     oauth_token = create_oauth_token(user)

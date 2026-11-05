@@ -45,6 +45,10 @@ module AuthHelper
     end
     
     previous_refresh_token = ''
+    # Um refresh herda o device_type do token sendo renovado (mesmo
+    # dispositivo físico); só classifica do zero quando não há token
+    # anterior (login de verdade) ou ele é de antes desta coluna existir.
+    device_type = token&.device_type || classify_device_type(request&.user_agent)
 
     if token.present?
       previous_refresh_token = token.refresh_token if token.refresh_token.present?
@@ -59,8 +63,19 @@ module AuthHelper
       expires_in: Doorkeeper.configuration.access_token_expires_in,
       scopes: 'read write',
       use_refresh_token: true,
-      previous_refresh_token: previous_refresh_token
+      previous_refresh_token: previous_refresh_token,
+      device_type: device_type
     )
+  end
+
+  # 'desktop' ou 'mobile', a partir do User-Agent da requisição atual.
+  # Usado pra escopar a revogação de sessão por tipo de dispositivo (ver
+  # invalidate_same_device_tokens) — nunca precisa ser perfeito, só
+  # consistente o bastante pra separar "um PC" de "um celular".
+  def classify_device_type(user_agent)
+    return 'desktop' if user_agent.blank?
+
+    user_agent.match?(/Mobile|Android|iPhone|iPad|iPod/i) ? 'mobile' : 'desktop'
   end
 
   def invalidate_user_tokens(user)
@@ -69,6 +84,21 @@ module AuthHelper
     active_tokens.pluck(:token).each { |t| TokenValidationService.invalidate_cache_for_token(t) }
 
     # Revoke all existing tokens for this user
+    active_tokens.each(&:revoke)
+  end
+
+  # Mesma coisa que invalidate_user_tokens, mas só pro mesmo tipo de
+  # dispositivo do login atual — permite até 1 sessão PC + 1 sessão
+  # celular simultâneas em vez de "só uma sessão no total". Usado nos
+  # fluxos de LOGIN (render_successful_login, create_user); logout
+  # continua usando invalidate_user_tokens (revoga tudo, propositalmente).
+  def invalidate_same_device_tokens(user, device_type)
+    active_tokens = Doorkeeper::AccessToken.where(
+      resource_owner_id: user.id,
+      revoked_at: nil,
+      device_type: device_type
+    )
+    active_tokens.pluck(:token).each { |t| TokenValidationService.invalidate_cache_for_token(t) }
     active_tokens.each(&:revoke)
   end
 
@@ -424,7 +454,7 @@ module AuthHelper
       # Se usuário já existe, validar senha
       if existing_user.valid_password?(password)
         # Senha correta: criar token OAuth e retornar usuário existente (permitindo registro em outro workspace)
-        invalidate_user_tokens(existing_user)
+        invalidate_same_device_tokens(existing_user, classify_device_type(request&.user_agent))
         oauth_token = create_oauth_token(existing_user)
         
         success_response(
